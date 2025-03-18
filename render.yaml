@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: safety-monitor-server
+    runtime: node
+    buildCommand: cd server && npm install
+    startCommand: cd server && node server.js
+    env: node 
