@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safety Monitor Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .notification-card {
+            margin-bottom: 15px;
+            border-left: 5px solid #007bff;
+        }
+        .app-name {
+            font-weight: bold;
+            color: #007bff;
+        }
+        .timestamp {
+            color: #6c757d;
+            font-size: 0.85rem;
+        }
+        .notification-title {
+            font-weight: bold;
+        }
+        #loading {
+            text-align: center;
+            padding: 2rem;
+        }
+        .filter-section {
+            background-color: #f8f9fa;
+            padding: 1rem;
+            border-radius: 5px;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="#">Safety Monitor Dashboard</a>
+            <button class="btn btn-outline-light" onclick="logout()">Logout</button>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-3">
+                <div class="filter-section">
+                    <h5>Filters</h5>
+                    <div class="mb-3">
+                        <label for="appFilter" class="form-label">App Name</label>
+                        <input type="text" class="form-control" id="appFilter" placeholder="Filter by app">
+                    </div>
+                    <div class="mb-3">
+                        <label for="textFilter" class="form-label">Content</label>
+                        <input type="text" class="form-control" id="textFilter" placeholder="Filter by content">
+                    </div>
+                    <button id="applyFilters" class="btn btn-primary">Apply Filters</button>
+                    <button id="clearFilters" class="btn btn-secondary mt-2">Clear</button>
+                </div>
+            </div>
+            <div class="col-md-9">
+                <h3>Recent Notifications</h3>
+                <div id="loading">Loading notifications...</div>
+                <div id="notifications-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // For local testing
+        const API_URL = 'http://localhost:3000';
+        // For production
+        // const API_URL = 'https://your-app-name.onrender.com';
+        
+        const API_KEY = 'safety-monitor-123';
+        
+        let allNotifications = [];
+        
+        // Check if user is logged in
+        const authToken = localStorage.getItem('authToken');
+        if (!authToken) {
+            window.location.href = 'login.html';
+        }
+        
+        // Fetch notifications from the server
+        async function fetchNotifications() {
+            try {
+                const response = await fetch(`${API_URL}/api/notifications`, {
+                    headers: {
+                        'X-API-Key': authToken,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.status === 401) {
+                    // Redirect to login if unauthorized
+                    window.location.href = 'login.html';
+                    return;
+                }
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                document.getElementById('loading').style.display = 'none';
+                allNotifications = data;
+                displayNotifications(data);
+            } catch (error) {
+                console.error('Error fetching notifications:', error);
+                document.getElementById('loading').innerHTML = 'Error loading notifications. Please try again later.';
+            }
+        }
+        
+        // Display notifications in the UI
+        function displayNotifications(notifications) {
+            const container = document.getElementById('notifications-container');
+            container.innerHTML = '';
+            
+            if (notifications.length === 0) {
+                container.innerHTML = '<div class="alert alert-info">No notifications found.</div>';
+                return;
+            }
+            
+            notifications.forEach(notification => {
+                const date = new Date(notification.timestamp);
+                const formattedDate = date.toLocaleString();
+                
+                const card = document.createElement('div');
+                card.className = 'card notification-card';
+                card.innerHTML = `
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <span class="app-name">${notification.appName || notification.packageName}</span>
+                            <span class="timestamp">${formattedDate}</span>
+                        </div>
+                        <div class="notification-title">${notification.title}</div>
+                        <div class="notification-text">${notification.text}</div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+        
+        // Filter notifications
+        function filterNotifications() {
+            const appFilter = document.getElementById('appFilter').value.toLowerCase();
+            const textFilter = document.getElementById('textFilter').value.toLowerCase();
+            
+            const filtered = allNotifications.filter(notification => {
+                const appName = (notification.appName || notification.packageName).toLowerCase();
+                const title = (notification.title || '').toLowerCase();
+                const text = (notification.text || '').toLowerCase();
+                
+                return (appName.includes(appFilter) && 
+                       (title.includes(textFilter) || text.includes(textFilter)));
+            });
+            
+            displayNotifications(filtered);
+        }
+        
+        // Event listeners
+        document.getElementById('applyFilters').addEventListener('click', filterNotifications);
+        document.getElementById('clearFilters').addEventListener('click', () => {
+            document.getElementById('appFilter').value = '';
+            document.getElementById('textFilter').value = '';
+            displayNotifications(allNotifications);
+        });
+        
+        // Initial load
+        fetchNotifications();
+        
+        // Refresh every minute
+        setInterval(fetchNotifications, 60000);
+
+        function logout() {
+            localStorage.removeItem('authToken');
+            window.location.href = 'login.html';
+        }
+    </script>
+</body>
+</html> 

