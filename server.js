@@ -34,15 +34,13 @@ io.on('connection', (socket) => {
         io.userSockets[userId] = socket.id;
         socket.emit('authenticated', { userId });
 
-        // Deliver all messages for this user (sent or received)
+        // Deliver all messages for this user (sent or received) as a single event
         db.all(
             'SELECT * FROM messages WHERE senderId = ? OR receiverId = ? ORDER BY timestamp',
             [userId, userId],
             (err, rows) => {
                 if (!err && rows && rows.length > 0) {
-                    rows.forEach(msg => {
-                        socket.emit('new_message', msg);
-                    });
+                    socket.emit('all_messages', rows);
                 }
             }
         );
