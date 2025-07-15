@@ -1,111 +1,169 @@
 const express = require('express');
+const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
-const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
+const db = new sqlite3.Database('chat_messages.db');
 
 const app = express();
 const server = http.createServer(app);
+const io = socketIo(server);
 
-// Configure CORS for Socket.IO
-const io = socketIo(server, {
-    cors: {
-        origin: "*", // Allow all origins for development
-        methods: ["GET", "POST"],
-        credentials: true
-    }
+// Serve static files from the current directory
+app.use(express.static(__dirname));
+
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        senderId TEXT,
+        receiverId TEXT,
+        content TEXT,
+        timestamp TEXT
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_receiverId ON messages(receiverId)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_senderId ON messages(senderId)`);
 });
 
-// Store connected users with their socket IDs
-const connectedUsers = new Map(); // userId -> socketId
-const socketToUser = new Map(); // socketId -> userId
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Basic route
-app.get('/', (req, res) => {
-    res.send('UniqueQode Chat Server is running!');
-});
-
-// Socket.IO connection handling
 io.on('connection', (socket) => {
-    console.log(`🔌 New client connected: ${socket.id}`);
+    console.log('User connected:', socket.id);
 
-    // Handle user authentication
+    // Map userId to socket
     socket.on('authenticate', (userId) => {
-        console.log(`👤 User ${userId} authenticated with socket ${socket.id}`);
-        
-        // Store user mapping
-        connectedUsers.set(userId, socket.id);
-        socketToUser.set(socket.id, userId);
         socket.userId = userId;
-        
-        // Join user to their personal room
-        socket.join(`user_${userId}`);
-        
-        // Send authentication confirmation
-        socket.emit('authenticated', { 
-            userId, 
-            socketId: socket.id,
-            message: 'Successfully authenticated'
-        });
-        
-        console.log(`📊 Current connected users: ${connectedUsers.size}`);
-        console.log(`👥 Connected users:`, Array.from(connectedUsers.keys()));
+        if (!io.userSockets) io.userSockets = {};
+        io.userSockets[userId] = socket.id;
+        socket.emit('authenticated', { userId });
+
+        // Deliver all messages for this user (sent or received)
+        db.all(
+            'SELECT * FROM messages WHERE senderId = ? OR receiverId = ? ORDER BY timestamp',
+            [userId, userId],
+            (err, rows) => {
+                if (!err && rows && rows.length > 0) {
+                    rows.forEach(msg => {
+                        socket.emit('new_message', msg);
+                    });
+                }
+            }
+        );
     });
 
-    // Handle sending messages
-    socket.on('send_message', (messageData) => {
-        console.log('📤 Message received:', messageData);
-        
-        const { senderId, receiverId, content, timestamp } = messageData;
-        
-        if (!senderId || !receiverId || !content) {
-            console.error('❌ Invalid message data:', messageData);
-            socket.emit('message_error', { error: 'Invalid message data' });
-            return;
-        }
-        
-        // Create message object
+    // Handle sending messages (store in DB, relay if online)
+    socket.on('send_message', (data) => {
         const message = {
-            id: Date.now() + Math.random(), // Ensure unique ID
-            senderId,
-            receiverId,
-            content,
-            timestamp: timestamp || new Date().toISOString(),
-            senderName: 'User', // You can fetch this from database
-            receiverName: 'User' // You can fetch this from database
+            senderId: data.senderId,
+            receiverId: data.receiverId,
+            content: data.content,
+            timestamp: new Date().toISOString(),
+            clientId: data.clientId || null // Echo clientId if present
         };
+        // Store in DB
+        db.run(
+            'INSERT INTO messages (senderId, receiverId, content, timestamp) VALUES (?, ?, ?, ?)',
+            [message.senderId, message.receiverId, message.content, message.timestamp],
+            function(err) {
+                if (err) {
+                    socket.emit('message_error', { error: 'DB error' });
+                    return;
+                }
+                // Relay to receiver if online
+                const receiverSocketId = io.userSockets && io.userSockets[data.receiverId];
+                const fullMessage = { ...message, id: this.lastID };
+                if (receiverSocketId) {
+                    io.to(receiverSocketId).emit('new_message', fullMessage);
+                }
+                // Echo to sender for confirmation (include clientId)
+                socket.emit('message_sent', { success: true, clientId: message.clientId });
+                console.log(`Message sent from ${data.senderId} to ${data.receiverId}:`, data.content);
+            }
+        );
+    });
 
-        console.log(`📨 Processing message from ${senderId} to ${receiverId}`);
-
-        // Send acknowledgment to sender immediately
-        socket.emit('message_sent', {
-            messageId: message.id,
-            timestamp: message.timestamp,
-            success: true
-        });
-
-        // Send message to receiver if they're online
-        const receiverSocketId = connectedUsers.get(receiverId);
+    // Typing indicator events (refactored to match chat.html)
+    socket.on('typing', (receiverId) => {
+        console.log(`[SERVER] Received typing for receiverId=${receiverId} from userId=${socket.userId}`);
+        const receiverSocketId = io.userSockets && io.userSockets[receiverId];
         if (receiverSocketId) {
-            console.log(`📨 Sending message to ${receiverId} (socket: ${receiverSocketId})`);
-            
-            // Send to receiver's specific socket only (prevents duplicates)
-            io.to(receiverSocketId).emit('new_message', message);
+            console.log(`[SERVER] Relaying user_typing to socketId=${receiverSocketId} for userId=${socket.userId}`);
+            io.to(receiverSocketId).emit('user_typing', socket.userId);
         } else {
-            console.log(`📨 User ${receiverId} is offline, message will be delivered when they come online`);
+            console.log(`[SERVER] No receiver socket for receiverId=${receiverId}`);
         }
+    });
+    socket.on('stop_typing', (receiverId) => {
+        console.log(`[SERVER] Received stop_typing for receiverId=${receiverId} from userId=${socket.userId}`);
+        const receiverSocketId = io.userSockets && io.userSockets[receiverId];
+        if (receiverSocketId) {
+            console.log(`[SERVER] Relaying user_stopped_typing to socketId=${receiverSocketId} for userId=${socket.userId}`);
+            io.to(receiverSocketId).emit('user_stopped_typing', socket.userId);
+        } else {
+            console.log(`[SERVER] No receiver socket for receiverId=${receiverId}`);
+        }
+    });
 
-        // Send to sender's other tabs/devices (personal room) - but not to the current socket
-        socket.to(`user_${senderId}`).emit('new_message', message);
-        
-        console.log(`✅ Message processed successfully`);
+    // Remove all join_chat, typing, stop_typing, chat_updated, and room logic
+
+    socket.on('disconnect', () => {
+        if (socket.userId && io.userSockets) {
+            delete io.userSockets[socket.userId];
+        }
+        console.log('User disconnected:', socket.id);
     });
 });
 
-const PORT = process.env.PORT || 3000;
+// Routes
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Dashboard routes
+app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+app.get('/dashboard.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+// Views/Analytics routes
+app.get('/views', (req, res) => {
+    res.sendFile(path.join(__dirname, 'views.html'));
+});
+
+app.get('/views.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'views.html'));
+});
+
+// Search routes
+app.get('/search', (req, res) => {
+    res.sendFile(path.join(__dirname, 'search.html'));
+});
+
+app.get('/search.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'search.html'));
+});
+
+// Shop routes
+app.get('/shop', (req, res) => {
+    res.sendFile(path.join(__dirname, 'shop.html'));
+});
+
+app.get('/shop.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'shop.html'));
+});
+
+// Chats route
+app.get('/chats', (req, res) => {
+    res.sendFile(path.join(__dirname, 'chats.html'));
+});
+
+app.get('/chats.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'chats.html'));
+});
+
+// Start server
+const PORT = 3000;
 server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log('Socket.IO is ready for real-time connections');
 });
