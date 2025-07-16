@@ -18,7 +18,9 @@ db.serialize(() => {
         senderId TEXT,
         receiverId TEXT,
         content TEXT,
-        timestamp TEXT
+        timestamp TEXT,
+        audio TEXT DEFAULT NULL,
+        type TEXT DEFAULT 'text'
     )`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_receiverId ON messages(receiverId)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_senderId ON messages(senderId)`);
@@ -73,6 +75,36 @@ io.on('connection', (socket) => {
                 // Echo to sender for confirmation (include clientId)
                 socket.emit('message_sent', { success: true, clientId: message.clientId });
                 console.log(`Message sent from ${data.senderId} to ${data.receiverId}:`, data.content);
+            }
+        );
+    });
+
+    // Handle sending voice messages
+    socket.on('send_voice', (data) => {
+        const message = {
+            senderId: data.senderId,
+            receiverId: data.receiverId,
+            content: '[voice]',
+            audio: data.audio,
+            timestamp: new Date().toISOString(),
+            clientId: data.clientId || null,
+            type: 'voice'
+        };
+        db.run(
+            'INSERT INTO messages (senderId, receiverId, content, timestamp, audio, type) VALUES (?, ?, ?, ?, ?, ?)',
+            [message.senderId, message.receiverId, message.content, message.timestamp, message.audio, message.type],
+            function(err) {
+                if (err) {
+                    socket.emit('message_error', { error: 'DB error' });
+                    return;
+                }
+                const receiverSocketId = io.userSockets && io.userSockets[data.receiverId];
+                const fullMessage = { ...message, id: this.lastID };
+                if (receiverSocketId) {
+                    io.to(receiverSocketId).emit('new_message', fullMessage);
+                }
+                socket.emit('message_sent', { success: true, clientId: message.clientId });
+                console.log(`Voice message sent from ${data.senderId} to ${data.receiverId}`);
             }
         );
     });
