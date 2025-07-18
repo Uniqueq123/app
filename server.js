@@ -18,9 +18,7 @@ db.serialize(() => {
         senderId TEXT,
         receiverId TEXT,
         content TEXT,
-        timestamp TEXT,
-        audio TEXT DEFAULT NULL,
-        type TEXT DEFAULT 'text'
+        timestamp TEXT
     )`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_receiverId ON messages(receiverId)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_senderId ON messages(senderId)`);
@@ -34,6 +32,7 @@ io.on('connection', (socket) => {
         socket.userId = userId;
         if (!io.userSockets) io.userSockets = {};
         io.userSockets[userId] = socket.id;
+        console.log('[SERVER] User authenticated:', userId, 'socket:', socket.id);
         socket.emit('authenticated', { userId });
 
         // Deliver all messages for this user (sent or received) as a single event
@@ -79,36 +78,6 @@ io.on('connection', (socket) => {
         );
     });
 
-    // Handle sending voice messages
-    socket.on('send_voice', (data) => {
-        const message = {
-            senderId: data.senderId,
-            receiverId: data.receiverId,
-            content: '[voice]',
-            audio: data.audio,
-            timestamp: new Date().toISOString(),
-            clientId: data.clientId || null,
-            type: 'voice'
-        };
-        db.run(
-            'INSERT INTO messages (senderId, receiverId, content, timestamp, audio, type) VALUES (?, ?, ?, ?, ?, ?)',
-            [message.senderId, message.receiverId, message.content, message.timestamp, message.audio, message.type],
-            function(err) {
-                if (err) {
-                    socket.emit('message_error', { error: 'DB error' });
-                    return;
-                }
-                const receiverSocketId = io.userSockets && io.userSockets[data.receiverId];
-                const fullMessage = { ...message, id: this.lastID };
-                if (receiverSocketId) {
-                    io.to(receiverSocketId).emit('new_message', fullMessage);
-                }
-                socket.emit('message_sent', { success: true, clientId: message.clientId });
-                console.log(`Voice message sent from ${data.senderId} to ${data.receiverId}`);
-            }
-        );
-    });
-
     // Typing indicator events (refactored to match chat.html)
     socket.on('typing', (receiverId) => {
         console.log(`[SERVER] Received typing for receiverId=${receiverId} from userId=${socket.userId}`);
@@ -131,17 +100,72 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Recording indicator events
-    socket.on('recording', (receiverId) => {
-        const receiverSocketId = io.userSockets && io.userSockets[receiverId];
+    // WebRTC signaling relays
+    socket.on('webrtc-offer', (data) => {
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
         if (receiverSocketId) {
-            io.to(receiverSocketId).emit('user_recording', socket.userId);
+            io.to(receiverSocketId).emit('webrtc-offer', data);
         }
     });
-    socket.on('stop_recording', (receiverId) => {
-        const receiverSocketId = io.userSockets && io.userSockets[receiverId];
+    socket.on('webrtc-answer', (data) => {
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
         if (receiverSocketId) {
-            io.to(receiverSocketId).emit('user_stopped_recording', socket.userId);
+            io.to(receiverSocketId).emit('webrtc-answer', data);
+        }
+    });
+    socket.on('webrtc-ice-candidate', (data) => {
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-ice-candidate', data);
+        }
+    });
+    socket.on('webrtc-end-call', (data) => {
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-end-call', data);
+        }
+    });
+    // Relay call rejection
+    socket.on('webrtc-reject-call', (data) => {
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-reject-call', data);
+        }
+    });
+    // Video call signaling relays (independent)
+    socket.on('webrtc-video-offer', (data) => {
+        console.log('[SERVER] Relaying webrtc-video-offer from', data.from, 'to', data.to, 'socket:', io.userSockets && io.userSockets[data.to]);
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-video-offer', data);
+        }
+    });
+    socket.on('webrtc-video-answer', (data) => {
+        console.log('[SERVER] Relaying webrtc-video-answer from', data.from, 'to', data.to, 'socket:', io.userSockets && io.userSockets[data.to]);
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-video-answer', data);
+        }
+    });
+    socket.on('webrtc-video-ice-candidate', (data) => {
+        console.log('[SERVER] Relaying webrtc-video-ice-candidate from', data.from, 'to', data.to, 'socket:', io.userSockets && io.userSockets[data.to]);
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-video-ice-candidate', data);
+        }
+    });
+    socket.on('webrtc-video-end-call', (data) => {
+        console.log('[SERVER] Relaying webrtc-video-end-call from', data.from, 'to', data.to, 'socket:', io.userSockets && io.userSockets[data.to]);
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-video-end-call', data);
+        }
+    });
+    socket.on('webrtc-video-reject-call', (data) => {
+        console.log('[SERVER] Relaying webrtc-video-reject-call from', data.from, 'to', data.to, 'socket:', io.userSockets && io.userSockets[data.to]);
+        const receiverSocketId = io.userSockets && io.userSockets[data.to];
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('webrtc-video-reject-call', data);
         }
     });
 
