@@ -3,7 +3,7 @@ const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
 const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database('chat_messages.db');
+const { initBackupService, restoreFromSupabase } = require('./backup-service');
 
 const app = express();
 const server = http.createServer(app);
@@ -12,39 +12,85 @@ const io = socketIo(server);
 // Serve static files from the current directory
 app.use(express.static(__dirname));
 
+// Initialize SQLite database with updated schema
+const db = new sqlite3.Database('chat_messages.db');
+
+// Drop and recreate the messages table with all required columns
 db.serialize(() => {
+    // First drop existing indexes
+    db.run(`DROP INDEX IF EXISTS idx_receiverId`);
+    db.run(`DROP INDEX IF EXISTS idx_senderId`);
+    db.run(`DROP INDEX IF EXISTS idx_timestamp`);
+    
+    // Drop existing table
+    db.run(`DROP TABLE IF EXISTS messages`);
+    
+    // Create new table with all required columns
     db.run(`CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        senderId TEXT,
-        receiverId TEXT,
+        senderId TEXT NOT NULL,
+        receiverId TEXT NOT NULL,
         content TEXT,
-        timestamp TEXT
+        timestamp TEXT NOT NULL,
+        clientId TEXT,
+        isCallRecord INTEGER DEFAULT 0,
+        callType TEXT,
+        callDuration INTEGER
     )`);
+    
+    // Recreate indexes
     db.run(`CREATE INDEX IF NOT EXISTS idx_receiverId ON messages(receiverId)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_senderId ON messages(senderId)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)`);
+    
+    console.log('Database schema updated successfully');
 });
+
+// Function to get all messages for a user
+async function getUserMessages(userId) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            'SELECT * FROM messages WHERE senderId = ? OR receiverId = ? ORDER BY timestamp',
+            [userId, userId],
+            (err, rows) => {
+                if (err) {
+                    console.error('Error fetching messages:', err);
+                    reject(err);
+                    return;
+                }
+                resolve(rows || []);
+            }
+        );
+    });
+}
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
     // Map userId to socket
-    socket.on('authenticate', (userId) => {
-        socket.userId = userId;
-        if (!io.userSockets) io.userSockets = {};
-        io.userSockets[userId] = socket.id;
-        console.log('[SERVER] User authenticated:', userId, 'socket:', socket.id);
-        socket.emit('authenticated', { userId });
+    socket.on('authenticate', async (userId) => {
+        try {
+            socket.userId = userId;
+            if (!io.userSockets) io.userSockets = {};
+            io.userSockets[userId] = socket.id;
+            console.log('[SERVER] User authenticated:', userId, 'socket:', socket.id);
+            
+            // First emit authentication confirmation
+            socket.emit('authenticated', { userId });
 
-        // Deliver all messages for this user (sent or received) as a single event
-        db.all(
-            'SELECT * FROM messages WHERE senderId = ? OR receiverId = ? ORDER BY timestamp',
-            [userId, userId],
-            (err, rows) => {
-                if (!err && rows && rows.length > 0) {
-                    socket.emit('all_messages', rows);
-                }
+            // Then fetch and send all messages
+            const messages = await getUserMessages(userId);
+            if (messages && messages.length > 0) {
+                console.log(`[SERVER] Sending ${messages.length} messages to user ${userId}`);
+                socket.emit('all_messages', messages);
+            } else {
+                console.log(`[SERVER] No messages found for user ${userId}`);
+                socket.emit('all_messages', []);
             }
-        );
+        } catch (error) {
+            console.error('Error in authenticate handler:', error);
+            socket.emit('error', { message: 'Error loading messages' });
+        }
     });
 
     // Handle sending messages (store in DB, relay if online)
@@ -54,25 +100,66 @@ io.on('connection', (socket) => {
             receiverId: data.receiverId,
             content: data.content,
             timestamp: new Date().toISOString(),
-            clientId: data.clientId || null // Echo clientId if present
+            clientId: data.clientId || null,
+            isCallRecord: data.isCallRecord || false,
+            callType: data.callType || null,
+            callDuration: data.callDuration || null
         };
-        // Store in DB
+        
+        // Store in DB with expanded fields
         db.run(
-            'INSERT INTO messages (senderId, receiverId, content, timestamp) VALUES (?, ?, ?, ?)',
-            [message.senderId, message.receiverId, message.content, message.timestamp],
-            function(err) {
+            `INSERT INTO messages (
+                senderId, receiverId, content, timestamp, 
+                clientId, isCallRecord, callType, callDuration
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                message.senderId, 
+                message.receiverId, 
+                message.content, 
+                message.timestamp,
+                message.clientId,
+                message.isCallRecord ? 1 : 0,
+                message.callType,
+                message.callDuration
+            ],
+            async function(err) {
                 if (err) {
+                    console.error('Database error:', err);
                     socket.emit('message_error', { error: 'DB error' });
                     return;
                 }
+                
+                const fullMessage = { ...message, id: this.lastID };
+                
                 // Relay to receiver if online
                 const receiverSocketId = io.userSockets && io.userSockets[data.receiverId];
-                const fullMessage = { ...message, id: this.lastID };
                 if (receiverSocketId) {
                     io.to(receiverSocketId).emit('new_message', fullMessage);
+                    
+                    // Also send updated message list to receiver
+                    try {
+                        const receiverMessages = await getUserMessages(data.receiverId);
+                        io.to(receiverSocketId).emit('all_messages', receiverMessages);
+                    } catch (error) {
+                        console.error('Error sending updated messages to receiver:', error);
+                    }
                 }
-                // Echo to sender for confirmation (include clientId)
-                socket.emit('message_sent', { success: true, clientId: message.clientId });
+                
+                // Send updated message list to sender
+                try {
+                    const senderMessages = await getUserMessages(data.senderId);
+                    socket.emit('all_messages', senderMessages);
+                } catch (error) {
+                    console.error('Error sending updated messages to sender:', error);
+                }
+                
+                // Echo to sender for confirmation
+                socket.emit('message_sent', { 
+                    success: true, 
+                    clientId: message.clientId,
+                    messageId: this.lastID 
+                });
+                
                 console.log(`Message sent from ${data.senderId} to ${data.receiverId}:`, data.content);
             }
         );
@@ -229,9 +316,23 @@ app.get('/chats.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'chats.html'));
 });
 
-// Start server
-const PORT = 3000;
-server.listen(PORT, () => {
+// Start server with backup service
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, async () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log('Socket.IO is ready for real-time connections');
+    
+    try {
+        // First restore any missing messages from Supabase
+        console.log('Restoring messages from backup...');
+        await restoreFromSupabase();
+        
+        // Then start the backup service
+        console.log('Initializing backup service...');
+        await initBackupService();
+        
+        console.log('Backup service initialized successfully');
+    } catch (error) {
+        console.error('Error initializing backup services:', error);
+    }
 });
